@@ -1,36 +1,121 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Portfolio
 
-## Getting Started
+Персональный сайт-портфолио с чатом, который отвечает на вопросы об опыте владельца. Ответы строятся по документам, загруженным в базу (RAG). Сайт и чат работают на русском и английском.
 
-First, run the development server:
+## Стек
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+- Next.js 16 (App Router), React 19, TypeScript, Tailwind 4
+- Supabase Postgres с pgvector для поиска по документам
+- OpenRouter для чат-модели и эмбеддингов (по умолчанию `openai/gpt-4o-mini` и `openai/text-embedding-3-small`)
+- Vercel для деплоя
+
+## Как это работает
+
+1. Документы в формате Markdown хранятся в таблице `source_documents`. В git их нет.
+2. При индексации документ режется на части по заголовкам (до 1000 символов), для каждой части считается эмбеддинг, и результат попадает в таблицу `documents`.
+3. Когда пользователь задаёт вопрос в чате, вопрос превращается в эмбеддинг, из базы берутся ближайшие части на нужном языке, и модель отвечает с опорой на них.
+
+Ограничения чата: вопрос до 500 символов, в истории до 10 сообщений, ответ до 600 токенов.
+
+## Структура
+
+```
+src/
+  app/
+    page.tsx              тестовый интерфейс чата
+    admin/                страница управления документами
+    api/chat/             ответ на вопрос
+    api/admin/            login, logout, документы, переиндексация
+  lib/
+    ai.ts                 провайдер OpenRouter
+    supabase.ts           серверный клиент Supabase
+    rag.ts                разбиение на части и индексация
+    admin-auth.ts         авторизация в админке
+  instrumentation.ts      обход проблемы с сетью в dev
+scripts/                  ingest.ts, migrate.ts
+supabase/migrations/      SQL-миграции
+content/                  локальные Markdown-файлы для первичного импорта
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Запуск
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Нужны Node.js, проект в Supabase и ключ OpenRouter.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm install
+cp .env.example .env.local
+```
 
-## Learn More
+Заполните `.env.local`:
 
-To learn more about Next.js, take a look at the following resources:
+| Переменная | Назначение |
+| --- | --- |
+| `SUPABASE_URL` | адрес проекта Supabase |
+| `SUPABASE_SECRET_KEY` | секретный ключ Supabase (`sb_secret_...`) |
+| `OPENROUTER_API_KEY` | ключ OpenRouter |
+| `ADMIN_PASSWORD` | пароль для `/admin`; если не задан, админка отключена |
+| `ADMIN_SESSION_SECRET` | необязательно, секрет для подписи сессии |
+| `OPENROUTER_CHAT_MODEL` | необязательно, модель для чата |
+| `OPENROUTER_EMBEDDING_MODEL` | необязательно, модель для эмбеддингов |
+| `SUPABASE_DB_URL` | нужна только для миграций |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Для `SUPABASE_DB_URL` используйте адрес Session pooler: прямой хост Supabase работает только по IPv6.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Примените миграции и запустите сайт:
 
-## Deploy on Vercel
+```bash
+npm run db:migrate
+npm run dev
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Если в `content/ru` и `content/en` лежат Markdown-файлы, их можно разово загрузить в Supabase и проиндексировать:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npm run ingest
+```
+
+## Команды
+
+| Команда | Что делает |
+| --- | --- |
+| `npm run dev` | dev-сервер |
+| `npm run build` | сборка |
+| `npm run lint` | проверка ESLint |
+| `npx tsc --noEmit` | проверка типов |
+| `npm run db:migrate` | применяет новые миграции из `supabase/migrations/` |
+| `npm run ingest` | импорт и индексация файлов из `content/` |
+
+## Админка
+
+Страница `/admin` защищена паролем. Через неё можно:
+
+- сохранить документ без индексации или сразу с ней;
+- проиндексировать или переиндексировать документ;
+- убрать документ из индекса, оставив файл;
+- удалить файл вместе с индексом;
+- переиндексировать все документы.
+
+У каждого документа есть статус:
+
+- `indexed`: части есть, содержимое совпадает с проиндексированным;
+- `stale`: файл изменили после индексации;
+- `not_indexed`: файл есть, индекса нет;
+- `index_only`: части есть, а файла нет.
+
+## Миграции
+
+Каждое изменение схемы базы оформляется новым пронумерованным файлом в `supabase/migrations/`. Уже применённые файлы не редактируются. Применённые миграции записываются в таблицу `public.schema_migrations`, каждая выполняется в транзакции. Список миграций описан в `supabase/README.md`.
+
+## Деплой
+
+Проект рассчитан на Vercel. В настройках проекта нужно задать те же переменные окружения, кроме `SUPABASE_DB_URL`, если миграции вы запускаете с локальной машины.
+
+## Известные проблемы
+
+На некоторых сетях `fetch` в Node 26 периодически зависает с ошибкой `UND_ERR_CONNECT_TIMEOUT`. Для локальной разработки это обходится вызовом `setDefaultAutoSelectFamily(false)` в `src/instrumentation.ts` и в скриптах. На Vercel это не нужно.
+
+## Что ещё не сделано
+
+- ограничение частоты запросов для `/api/chat` и `/api/admin/login`;
+- страницы портфолио с переключением языка (`proxy.ts` и `app/[lang]`);
+- деплой на Vercel.
